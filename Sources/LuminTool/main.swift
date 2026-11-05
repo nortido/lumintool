@@ -1,0 +1,695 @@
+import AppKit
+import Combine
+import SwiftUI
+import LuminToolCore
+
+struct Monitor: Identifiable {
+    let id: String
+    let name: String
+    @MainActor static func connected() -> [Monitor] {
+        NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            let id = CGDirectDisplayID(number.uint32Value)
+            guard CGDisplayIsBuiltin(id) == 0, let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
+            return Monitor(id: CFUUIDCreateString(nil, uuid) as String, name: screen.localizedName)
+        }
+    }
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published private(set) var config: Configuration
+    @Published private(set) var sensors: [LightSensor] = []
+    @Published private(set) var monitors: [Monitor] = []
+    @Published private(set) var lux: Double?
+    @Published private(set) var brightness: Double?
+    @Published private(set) var sourceStatus = L("Enter a Home Assistant token")
+    @Published private(set) var displayStatus = L("Checking the monitor…")
+    @Published private(set) var hasToken = false
+    @Published private(set) var hasMQTTPassword = false
+    @Published private(set) var hasESPHomePassword = false
+    @Published private(set) var serialPorts: [String] = []
+    private let brightnessService = SystemBrightness()
+    private let ha = HomeAssistantConnection()
+    private let mqtt = MQTTConnection()
+    private let serial = SerialConnection()
+    private let esphome = ESPHomeConnection()
+    private var engine = AdaptiveBrightness()
+    private var controlTask: Task<Void, Never>?
+    private var generation = 0
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var sleeping = false
+
+    init() {
+        config = UserDefaults.standard.data(forKey: "configuration")
+            .flatMap { try? JSONDecoder().decode(Configuration.self, from: $0) } ?? Configuration()
+        monitors = Monitor.connected()
+        if config.monitor.isEmpty {
+            config.monitor = monitors.count == 1 ? monitors[0].id : ""
+        }
+        loadCurve()
+        ha.onSensors = { [weak self] in self?.sensors = $0 }
+        ha.onSelection = { [weak self] entity in
+            guard let self, self.config.entity != entity else { return }
+            self.config.entity = entity
+            self.saveConfiguration()
+            self.loadCurve()
+        }
+        ha.onLux = { [weak self] value in
+            self?.lux = value
+            self?.engine.sensor(value)
+        }
+        ha.onStatus = { [weak self] in self?.sourceStatus = $0 }
+        mqtt.onLux = { [weak self] value in
+            self?.lux = value
+            self?.engine.sensor(value)
+        }
+        mqtt.onStatus = { [weak self] in self?.sourceStatus = $0 }
+        serial.onLux = { [weak self] value in
+            self?.lux = value
+            self?.engine.sensor(value)
+        }
+        serial.onStatus = { [weak self] in self?.sourceStatus = $0 }
+        esphome.onSensors = { [weak self] in self?.sensors = $0 }
+        esphome.onSelection = { [weak self] key in
+            guard let self, self.config.esphome.sensor != key else { return }
+            self.config.esphome.sensor = key
+            self.saveConfiguration()
+            self.loadCurve()
+        }
+        esphome.onLux = { [weak self] value in
+            self?.lux = value
+            self?.engine.sensor(value)
+        }
+        esphome.onStatus = { [weak self] in self?.sourceStatus = $0 }
+        refreshSerialPorts()
+        let workspace = NSWorkspace.shared.notificationCenter
+        observers.append((workspace, workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.sleeping = true
+                self?.stop()
+            }
+        }))
+        observers.append((workspace, workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.sleeping = false
+                self?.refreshMonitors()
+            }
+        }))
+        observers.append((NotificationCenter.default, NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refreshMonitors() }
+        }))
+    }
+
+    deinit {
+        controlTask?.cancel()
+        for (center, observer) in observers { center.removeObserver(observer) }
+    }
+
+    private func saveConfiguration() {
+        if let data = try? JSONEncoder().encode(config) { UserDefaults.standard.set(data, forKey: "configuration") }
+    }
+
+    private func loadCurve() {
+        let curve = UserDefaults.standard.data(forKey: config.curveKey)
+            .flatMap { try? JSONDecoder().decode(BrightnessCurve.self, from: $0) } ?? BrightnessCurve()
+        engine = AdaptiveBrightness(curve: curve)
+        engine.sensor(lux)
+    }
+
+    private func saveCurve() {
+        if let data = try? JSONEncoder().encode(engine.curve) { UserDefaults.standard.set(data, forKey: config.curveKey) }
+    }
+
+    func refreshMonitors() {
+        monitors = Monitor.connected()
+        start()
+    }
+
+    func stop() {
+        generation += 1
+        controlTask?.cancel()
+        controlTask = nil
+        ha.stop()
+        mqtt.stop()
+        serial.stop()
+        esphome.stop()
+        engine.resetObservation()
+    }
+
+    func start() {
+        stop()
+        guard !sleeping else { return }
+        saveConfiguration()
+        switch config.source {
+        case .homeAssistant:
+            do {
+                let endpoint = try HomeAssistantEndpoint(config.server)
+                if let token = try TokenStore.read(account: endpoint.base.absoluteString), !token.isEmpty {
+                    hasToken = true
+                    ha.start(endpoint: endpoint, token: token, selected: config.entity)
+                } else {
+                    hasToken = false
+                    sourceStatus = L("Enter a Home Assistant token in Settings")
+                }
+            } catch { hasToken = false; sourceStatus = error.localizedDescription }
+        case .mqtt:
+            hasToken = false
+            hasMQTTPassword = false
+            guard config.hasSensor else { sourceStatus = L("Enter an MQTT broker and topic in Settings"); break }
+            do {
+                let endpoint = try MQTTEndpoint(config.mqtt.broker)
+                let topic = try MQTTTopic.validated(config.mqtt.topic)
+                let username = config.mqtt.username
+                let password = try username.isEmpty ? nil : TokenStore.read(account: "\(config.mqtt.broker)|\(username)", service: TokenStore.mqttService)
+                hasMQTTPassword = password?.isEmpty == false
+                mqtt.start(endpoint: endpoint, username: username, password: password ?? "", topic: topic, keyPath: config.mqtt.keyPath)
+            } catch { sourceStatus = error.localizedDescription }
+        case .serial:
+            hasToken = false
+            guard config.hasSensor else { sourceStatus = L("Choose a USB port in Settings"); break }
+            serial.start(path: config.serial.port, baud: config.serial.baud)
+        case .esphome:
+            hasToken = false
+            hasESPHomePassword = false
+            guard !config.esphome.address.isEmpty else { sourceStatus = L("Enter an ESPHome address in Settings"); break }
+            do {
+                let endpoint = try ESPHomeEndpoint(config.esphome.address)
+                let username = config.esphome.username
+                let password = try username.isEmpty ? nil : TokenStore.read(account: "\(endpoint.address)|\(username)", service: TokenStore.esphomeService)
+                hasESPHomePassword = password?.isEmpty == false
+                esphome.start(endpoint: endpoint, username: username, password: password ?? "", selected: config.esphome.sensor)
+            } catch { sourceStatus = error.localizedDescription }
+        }
+        let epoch = generation
+        controlTask = Task { @MainActor [weak self] in
+            let clock = ContinuousClock()
+            var deadline = clock.now
+            while !Task.isCancelled {
+                guard let self, self.generation == epoch else { return }
+                await self.controlStep(epoch: epoch)
+                deadline += .milliseconds(100)
+                if deadline < clock.now { deadline = clock.now }
+                do { try await clock.sleep(until: deadline, tolerance: .milliseconds(2)) } catch { return }
+            }
+        }
+    }
+
+    private func controlStep(epoch: Int) async {
+        guard monitors.contains(where: { $0.id == config.monitor }) else {
+            displayStatus = L("Monitor disconnected or not selected")
+            brightness = nil
+            engine.resetObservation()
+            return
+        }
+        do {
+            let current = try await brightnessService.brightness(display: config.monitor)
+            guard epoch == generation, !Task.isCancelled,
+                  monitors.contains(where: { $0.id == config.monitor }) else { return }
+            brightness = current
+            displayStatus = config.enabled ? (lux == nil ? L("Waiting for the sensor; brightness kept") : L("Auto brightness on")) : L("Auto brightness paused")
+            guard config.enabled, config.hasSensor else { engine.resetObservation(); return }
+            switch engine.tick(brightness: current, now: ProcessInfo.processInfo.systemUptime) {
+            case .hold:
+                if engine.isSettling { displayStatus = L("Waiting for the monitor to apply brightness") }
+            case .learned: saveCurve()
+            case .set(let value):
+                let applied = try await brightnessService.setBrightness(value, display: config.monitor)
+                guard epoch == generation, !Task.isCancelled else { return }
+                engine.acknowledge(brightness: applied, requested: value)
+                brightness = applied
+            }
+        } catch {
+            guard epoch == generation, !Task.isCancelled else { return }
+            displayStatus = error.localizedDescription
+            engine.resetObservation()
+        }
+    }
+
+    func connect(server: String, token: String) throws {
+        let endpoint = try HomeAssistantEndpoint(server)
+        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty { try TokenStore.save(token, account: endpoint.base.absoluteString) }
+        guard try TokenStore.read(account: endpoint.base.absoluteString) != nil else {
+            throw LuminToolError.message(L("Enter a long-lived Home Assistant token."))
+        }
+        stop()
+        if config.server != endpoint.base.absoluteString {
+            config.entity = ""
+            sensors = []
+        }
+        config.server = endpoint.base.absoluteString
+        loadCurve()
+        start()
+    }
+
+    func connectMQTT(broker: String, username: String, password: String, topic: String, keyPath: String) throws {
+        let endpoint = try MQTTEndpoint(broker)
+        let topic = try MQTTTopic.validated(topic)
+        let username = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !username.isEmpty || password.isEmpty else { throw LuminToolError.message(L("Enter a login for the password.")) }
+        if !password.isEmpty {
+            try TokenStore.save(password, account: "\(endpoint.address)|\(username)", service: TokenStore.mqttService)
+        }
+        stop()
+        config.mqtt.broker = endpoint.address
+        config.mqtt.username = username
+        config.mqtt.topic = topic
+        config.mqtt.keyPath = keyPath.trimmingCharacters(in: .whitespaces)
+        loadCurve()
+        start()
+    }
+
+    func chooseSource(_ kind: SourceKind) {
+        guard kind != config.source else { return }
+        stop()
+        sensors = []
+        config.source = kind
+        loadCurve()
+        start()
+    }
+
+    func refreshSerialPorts() {
+        serialPorts = SerialPorts.candidates((try? FileManager.default.contentsOfDirectory(atPath: "/dev")) ?? [])
+    }
+
+    func connectESPHome(address: String, username: String, password: String) throws {
+        let endpoint = try ESPHomeEndpoint(address)
+        let username = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !username.isEmpty || password.isEmpty else { throw LuminToolError.message(L("Enter a login for the password.")) }
+        if !password.isEmpty {
+            try TokenStore.save(password, account: "\(endpoint.address)|\(username)", service: TokenStore.esphomeService)
+        }
+        stop()
+        if config.esphome.address != endpoint.address {
+            config.esphome.sensor = ""
+            sensors = []
+        }
+        config.esphome.address = endpoint.address
+        config.esphome.username = username
+        loadCurve()
+        start()
+    }
+
+    func chooseSerialPort(_ path: String) {
+        stop()
+        config.serial.port = path
+        loadCurve()
+        start()
+    }
+
+    func chooseSerialBaud(_ baud: Int) {
+        stop()
+        config.serial.baud = baud
+        loadCurve()
+        start()
+    }
+
+    func chooseSensor(_ entity: String) {
+        stop()
+        config.entity = entity
+        loadCurve()
+        start()
+    }
+
+    func chooseESPHomeSensor(_ key: String) {
+        stop()
+        config.esphome.sensor = key
+        loadCurve()
+        start()
+    }
+
+    func chooseMonitor(_ monitor: String) {
+        stop()
+        config.monitor = monitor
+        loadCurve()
+        start()
+    }
+
+    func toggleEnabled() {
+        config.enabled.toggle()
+        start()
+    }
+
+    func resetCalibration() {
+        stop()
+        engine = AdaptiveBrightness()
+        saveCurve()
+        start()
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var model: AppModel
+    @State private var server = ""
+    @State private var token = ""
+    @State private var broker = ""
+    @State private var mqttUser = ""
+    @State private var mqttPassword = ""
+    @State private var topic = ""
+    @State private var keyPath = ""
+    @State private var esphomeAddress = ""
+    @State private var esphomeUser = ""
+    @State private var esphomePassword = ""
+    @State private var error = ""
+    @State private var language = AppLanguage(appleLanguages: UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?["AppleLanguages"] as? [String])
+    @State private var languageChanged = false
+
+    private var formHeight: CGFloat {
+        switch model.config.source {
+        case .homeAssistant: return 345
+        case .mqtt: return 425
+        case .serial: return 265
+        case .esphome: return 385
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("LuminTool").font(.largeTitle.bold())
+            Text("Monitor brightness from an illuminance sensor.").foregroundStyle(.secondary)
+            Form {
+                Picker("Source", selection: Binding(get: { model.config.source }, set: { error = ""; model.chooseSource($0) })) {
+                    Text(verbatim: "Home Assistant").tag(SourceKind.homeAssistant)
+                    Text(verbatim: "MQTT").tag(SourceKind.mqtt)
+                    Text(verbatim: "USB").tag(SourceKind.serial)
+                    Text(verbatim: "ESPHome").tag(SourceKind.esphome)
+                }
+                if model.config.source == .homeAssistant {
+                    TextField("Home Assistant", text: $server)
+                    SecureField(model.hasToken ? L("New token (optional)") : L("Long-lived token"), text: $token)
+                    HStack {
+                        Button("Connect") {
+                            do { try model.connect(server: server, token: token); token = ""; error = "" }
+                            catch { self.error = error.localizedDescription }
+                        }.keyboardShortcut(.defaultAction)
+                        Button("Create token") {
+                            if let endpoint = try? HomeAssistantEndpoint(server) {
+                                NSWorkspace.shared.open(endpoint.base.appendingPathComponent("profile/security"))
+                            }
+                        }
+                    }
+                    Picker("Sensor", selection: Binding(get: { model.config.entity }, set: model.chooseSensor)) {
+                        Text("Auto").tag("")
+                        if !model.config.entity.isEmpty && !model.sensors.contains(where: { $0.id == model.config.entity }) {
+                            Text(model.config.entity).tag(model.config.entity)
+                        }
+                        ForEach(model.sensors) { sensor in Text("\(sensor.name) — \(sensor.id)").tag(sensor.id) }
+                    }
+                }
+                if model.config.source == .mqtt {
+                    TextField("Broker", text: $broker, prompt: Text(verbatim: "mqtt://homeassistant.local"))
+                    TextField("Login", text: $mqttUser)
+                    SecureField(model.hasMQTTPassword ? L("New password (optional)") : L("Password"), text: $mqttPassword)
+                    TextField("Topic", text: $topic)
+                    TextField("JSON key", text: $keyPath, prompt: Text("Auto"))
+                    Button("Connect") {
+                        do {
+                            try model.connectMQTT(broker: broker, username: mqttUser, password: mqttPassword, topic: topic, keyPath: keyPath)
+                            mqttPassword = ""
+                            error = ""
+                        } catch { self.error = error.localizedDescription }
+                    }.keyboardShortcut(.defaultAction)
+                }
+                if model.config.source == .esphome {
+                    TextField("Address", text: $esphomeAddress, prompt: Text(verbatim: "sensor.local"))
+                    TextField("Login", text: $esphomeUser)
+                    SecureField(model.hasESPHomePassword ? L("New password (optional)") : L("Password"), text: $esphomePassword)
+                    Button("Connect") {
+                        do {
+                            try model.connectESPHome(address: esphomeAddress, username: esphomeUser, password: esphomePassword)
+                            esphomePassword = ""
+                            error = ""
+                        } catch { self.error = error.localizedDescription }
+                    }.keyboardShortcut(.defaultAction)
+                    Picker("Sensor", selection: Binding(get: { model.config.esphome.sensor }, set: model.chooseESPHomeSensor)) {
+                        Text("Auto").tag("")
+                        if !model.config.esphome.sensor.isEmpty && !model.sensors.contains(where: { $0.id == model.config.esphome.sensor }) {
+                            Text(verbatim: model.config.esphome.sensor).tag(model.config.esphome.sensor)
+                        }
+                        ForEach(model.sensors) { sensor in Text(verbatim: sensor.name).tag(sensor.id) }
+                    }
+                }
+                if model.config.source == .serial {
+                    HStack {
+                        Picker("Port", selection: Binding(get: { model.config.serial.port }, set: model.chooseSerialPort)) {
+                            Text("Choose a port").tag("")
+                            if !model.config.serial.port.isEmpty && !model.serialPorts.contains(model.config.serial.port) {
+                                Text(verbatim: model.config.serial.port).tag(model.config.serial.port)
+                            }
+                            ForEach(model.serialPorts, id: \.self) { Text(verbatim: $0).tag($0) }
+                        }
+                        Button("Refresh") { model.refreshSerialPorts() }
+                    }
+                    Picker("Speed", selection: Binding(get: { model.config.serial.baud }, set: model.chooseSerialBaud)) {
+                        ForEach([9600, 19200, 38400, 57600, 115200], id: \.self) { Text(verbatim: String($0)).tag($0) }
+                    }
+                }
+                Picker("Monitor", selection: Binding(get: { model.config.monitor }, set: model.chooseMonitor)) {
+                    Text("Choose a monitor").tag("")
+                    if !model.config.monitor.isEmpty && !model.monitors.contains(where: { $0.id == model.config.monitor }) {
+                        Text("Monitor disconnected").tag(model.config.monitor)
+                    }
+                    ForEach(model.monitors) { monitor in Text(monitor.name).tag(monitor.id) }
+                }
+                Toggle("Auto brightness", isOn: Binding(get: { model.config.enabled }, set: { _ in model.toggleEnabled() }))
+                Picker("Language", selection: $language) {
+                    Text("System").tag(AppLanguage.system)
+                    Text(verbatim: "English").tag(AppLanguage.english)
+                    Text(verbatim: "Русский").tag(AppLanguage.russian)
+                }.onChange(of: language) { _, value in
+                    if let languages = value.appleLanguages {
+                        UserDefaults.standard.set(languages, forKey: "AppleLanguages")
+                    } else {
+                        UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                    }
+                    languageChanged = true
+                }
+                if languageChanged {
+                    HStack {
+                        Text("Restart LuminTool to change the language.").foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Restart") { restart() }
+                    }
+                }
+            }.formStyle(.grouped).frame(height: formHeight + (languageChanged ? 40 : 0))
+            if model.config.source == .homeAssistant, (try? HomeAssistantEndpoint(server))?.base.scheme == "http" {
+                Text("HTTP does not encrypt the token. Use HTTPS for a secure connection.")
+                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            if model.config.source == .mqtt, !mqttUser.isEmpty, (try? MQTTEndpoint(broker))?.tls == false {
+                Text("The password is sent unencrypted. Use mqtts:// for a secure connection.")
+                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            if model.config.source == .esphome, !esphomeUser.isEmpty, (try? ESPHomeEndpoint(esphomeAddress))?.base.scheme == "http" {
+                Text("The password may be sent unencrypted over http.")
+                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text(model.sourceStatus)
+                Text(model.displayStatus)
+                Text("\(model.lux.map { String(format: "%.1f lx", $0) } ?? "— lx") · \(model.brightness.map { String(format: "%.0f%%", $0 * 100) } ?? "—%")")
+                    .font(.system(.body, design: .monospaced))
+                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            }.font(.callout)
+            Text("Set the brightness you like, and LuminTool remembers it for this light level.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(width: 590)
+        .onAppear {
+            server = model.config.server
+            broker = model.config.mqtt.broker
+            mqttUser = model.config.mqtt.username
+            topic = model.config.mqtt.topic
+            keyPath = model.config.mqtt.keyPath
+            esphomeAddress = model.config.esphome.address
+            esphomeUser = model.config.esphome.username
+            model.refreshSerialPorts()
+        }
+    }
+
+    private func restart() {
+        model.stop()
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            DispatchQueue.main.async {
+                if error == nil { NSApp.terminate(nil) } else { model.start() }
+            }
+        }
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private let model = AppModel()
+    private var statusItem: NSStatusItem!
+    private var window: NSWindow?
+    private let illuminanceItem = NSMenuItem(title: L("Sensor unavailable"), action: nil, keyEquivalent: "")
+    private let brightnessItem = NSMenuItem(title: L("Brightness unavailable"), action: nil, keyEquivalent: "")
+    private let displayStatusItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private var subscriptions = Set<AnyCancellable>()
+    private var iconLevel = -1
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let menu = NSMenu()
+        menu.delegate = self
+        statusItem.menu = menu
+        installEditMenu()
+        bindStatusItems()
+        model.start()
+        if !model.config.hasSensor || (model.config.source == .homeAssistant && !model.hasToken) { showSettings() }
+    }
+
+    // A menu bar app has no visible main menu, but Cmd+V and friends only work through one
+    private func installEditMenu() {
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        let main = NSMenu()
+        main.addItem(editItem)
+        NSApp.mainMenu = main
+    }
+
+    private func bindStatusItems() {
+        model.$lux.sink { [weak self] value in
+            self?.illuminanceItem.title = value.map { String(format: L("Illuminance: %.1f lx"), $0) } ?? L("Sensor unavailable")
+        }.store(in: &subscriptions)
+        model.$brightness.sink { [weak self] value in
+            self?.brightnessItem.title = value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable")
+            self?.updateIcon(value)
+        }.store(in: &subscriptions)
+        model.$displayStatus.sink { [weak self] value in self?.displayStatusItem.title = value }
+            .store(in: &subscriptions)
+    }
+
+    private func updateIcon(_ brightness: Double?) {
+        let level = Int(((brightness ?? 0) * 100).rounded())
+        guard level != iconLevel else { return }
+        iconLevel = level
+        statusItem.button?.image = Self.icon(level: Double(level) / 100)
+    }
+
+    private static func icon(level: Double) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            let transform = NSAffineTransform()
+            transform.scale(by: 18.0 / 24)
+            transform.concat()
+            let center = NSPoint(x: 12, y: 8.75)
+            func stroke(_ path: NSBezierPath, alpha: CGFloat = 1) {
+                path.lineWidth = 2
+                path.lineCapStyle = .round
+                NSColor.black.withAlphaComponent(alpha).setStroke()
+                path.stroke()
+            }
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: 10, startAngle: 180, endAngle: 0, clockwise: true)
+            stroke(track, alpha: 0.3)
+            if level > 0 {
+                let arc = NSBezierPath()
+                arc.appendArc(withCenter: center, radius: 10, startAngle: 180, endAngle: 180 - 180 * level, clockwise: true)
+                stroke(arc)
+            }
+            for degrees in [40.0, 90, 140] {
+                let angle = degrees * .pi / 180
+                let ray = NSBezierPath()
+                ray.move(to: NSPoint(x: center.x + 4.4 * cos(angle), y: center.y + 4.4 * sin(angle)))
+                ray.line(to: NSPoint(x: center.x + 5.8 * cos(angle), y: center.y + 5.8 * sin(angle)))
+                stroke(ray)
+            }
+            let sun = NSBezierPath()
+            sun.appendArc(withCenter: center, radius: 2.9, startAngle: 0, endAngle: 180)
+            sun.close()
+            NSColor.black.setFill()
+            sun.fill()
+            let ground = NSBezierPath()
+            ground.move(to: NSPoint(x: 1, y: 8.75))
+            ground.line(to: NSPoint(x: 23, y: 8.75))
+            ground.move(to: NSPoint(x: 7, y: 5.25))
+            ground.line(to: NSPoint(x: 17, y: 5.25))
+            stroke(ground)
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = L("LuminTool auto brightness")
+        return image
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for item in [illuminanceItem, brightnessItem, displayStatusItem] {
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let enabled = NSMenuItem(title: L("Auto brightness"), action: #selector(toggle), keyEquivalent: "")
+        enabled.state = model.config.enabled ? .on : .off
+        enabled.target = self
+        menu.addItem(enabled)
+        for (title, action) in [(L("Settings"), #selector(showSettings)), (L("Reset calibration"), #selector(reset)), (L("Quit"), #selector(quit))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+    }
+
+    @objc func showSettings() {
+        if window == nil {
+            let controller = NSHostingController(rootView: SettingsView(model: model))
+            let window = NSWindow(contentViewController: controller)
+            window.title = "LuminTool"
+            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            self.window = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func toggle() { model.toggleEnabled() }
+    @objc private func reset() {
+        let alert = NSAlert()
+        alert.messageText = L("Reset calibration for this sensor and monitor?")
+        alert.informativeText = L("The current brightness becomes the starting point.")
+        alert.addButton(withTitle: L("Reset"))
+        alert.addButton(withTitle: L("Cancel"))
+        if alert.runModal() == .alertFirstButtonReturn { model.resetCalibration() }
+    }
+    @objc private func quit() { model.stop(); NSApp.terminate(nil) }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+if CommandLine.arguments.contains("--probe") {
+    Task { @MainActor in
+        do {
+            let brightnessService = SystemBrightness()
+            let monitors = Monitor.connected()
+            for monitor in monitors {
+                print("Monitor: \(monitor.name), UUID: \(monitor.id)")
+                let brightness = try await brightnessService.brightness(display: monitor.id)
+                print("Brightness: \(brightness)")
+            }
+            if monitors.isEmpty { throw LuminToolError.message("No external monitor detected") }
+            exit(0)
+        } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+    }
+    app.run()
+} else {
+    MainActor.assumeIsolated {
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}
