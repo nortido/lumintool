@@ -182,4 +182,25 @@ final class AdaptiveBrightnessTests: XCTestCase {
         XCTAssertEqual(engine.tick(brightness: 0.4, now: 2.1), .hold)
         guard case .set = engine.tick(brightness: 0.4, now: 2.2) else { return XCTFail("Expected retry after rejected write") }
     }
+
+    func testCurveKeepsFivePointsAndReplacesNearest() {
+        var curve = BrightnessCurve()
+        curve.learn(lux: 50, brightness: 0.3)
+        XCTAssertEqual(curve.points.map(\.lux), [0, 10, 50, 500, 2000])
+        for lux in [3.0, 30, 300, 3000, 7, 70, 700, 7000, 1] {
+            curve.learn(lux: lux, brightness: min(1, log10(lux + 1) / 4))
+            XCTAssertLessThanOrEqual(curve.points.count, 5)
+            XCTAssertEqual(curve.value(at: lux), min(1, log10(lux + 1) / 4), accuracy: 0.0001)
+        }
+    }
+
+    func testStoredCurveWithManyPointsIsTrimmedToFive() throws {
+        let points = [0.0, 5, 10, 20, 100, 120, 500, 2000].enumerated().map { "{\"lux\":\($1),\"brightness\":\(Double($0) / 7)}" }
+        let json = "{\"isCalibrated\":true,\"points\":[\(points.joined(separator: ","))]}"
+        let curve = try JSONDecoder().decode(BrightnessCurve.self, from: Data(json.utf8))
+        XCTAssertEqual(curve.points.count, 5)
+        XCTAssertEqual(curve.points.first?.lux, 0)
+        XCTAssertEqual(curve.points.last?.lux, 2000)
+        XCTAssertTrue(curve.isCalibrated)
+    }
 }

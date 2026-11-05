@@ -11,6 +11,7 @@ public struct BrightnessCurve: Codable, Equatable {
         Point(lux: 100, brightness: 0.4), Point(lux: 500, brightness: 0.7),
         Point(lux: 2000, brightness: 1)
     ]
+    public static let maxPoints = 5
     public private(set) var isCalibrated = false
     public init() {}
 
@@ -23,6 +24,11 @@ public struct BrightnessCurve: Codable, Equatable {
               points.allSatisfy({ $0.lux.isFinite && $0.lux >= 0 && $0.brightness.isFinite && (0...1).contains($0.brightness) }),
               zip(points, points.dropFirst()).allSatisfy({ $0.lux < $1.lux && $0.brightness <= $1.brightness }) else {
             throw DecodingError.dataCorruptedError(forKey: .points, in: container, debugDescription: "Invalid calibration")
+        }
+        while points.count > Self.maxPoints {
+            let gaps = zip(points, points.dropFirst()).map { log1p($1.lux) - log1p($0.lux) }
+            let index = gaps.indices.min { gaps[$0] < gaps[$1] }! + 1
+            points.remove(at: index == points.count - 1 ? index - 1 : index)
         }
     }
 
@@ -40,6 +46,10 @@ public struct BrightnessCurve: Codable, Equatable {
     public mutating func learn(lux: Double, brightness: Double) {
         guard lux.isFinite, lux >= 0, brightness.isFinite, (0...1).contains(brightness) else { return }
         points.removeAll { abs(log1p($0.lux) - log1p(lux)) < 0.12 }
+        while points.count >= Self.maxPoints,
+              let nearest = points.indices.min(by: { abs(log1p(points[$0].lux) - log1p(lux)) < abs(log1p(points[$1].lux) - log1p(lux)) }) {
+            points.remove(at: nearest)
+        }
         for index in points.indices {
             points[index].brightness = points[index].lux < lux
                 ? min(points[index].brightness, brightness) : max(points[index].brightness, brightness)
