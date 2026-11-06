@@ -24,7 +24,6 @@
 "Auto brightness paused" = "Автояркость на паузе";
 "Waiting for the monitor to apply brightness" = "Ожидание применения яркости монитором";
 "Enter a long-lived Home Assistant token." = "Введите долгосрочный токен Home Assistant.";
-"New token (optional)" = "Новый токен (необязательно)";
 "Long-lived token" = "Долгосрочный токен";
 "Sensor unavailable" = "Датчик недоступен";
 "Brightness unavailable" = "Яркость недоступна";
@@ -38,7 +37,6 @@
 "Settings" = "Настройки";
 "Reset" = "Сбросить";
 "Cancel" = "Отмена";
-"Monitor brightness from an illuminance sensor." = "Яркость монитора по датчику освещённости.";
 "Connect" = "Подключить";
 "Create token" = "Создать токен";
 "Auto" = "Автовыбор";
@@ -76,7 +74,6 @@
 "Broker" = "Брокер";
 "Login" = "Логин";
 "Password" = "Пароль";
-"New password (optional)" = "Новый пароль (необязательно)";
 "Topic" = "Топик";
 "JSON key" = "Ключ JSON";
 "The password is sent unencrypted. Use mqtts:// for a secure connection." = "Пароль передаётся без шифрования. Для защищённого соединения используйте mqtts://.";
@@ -104,3 +101,12 @@
 "The ESPHome device closed the connection." = "Устройство ESPHome закрыло соединение.";
 "The sensor reports no valid illuminance." = "Датчик не передаёт корректную освещённость.";
 "The password may be sent unencrypted over http." = "Пароль может передаваться без шифрования по http.";
+"Light sensor" = "Датчик освещённости";
+"Optional" = "Необязательно";
+"Advanced" = "Дополнительно";
+"Illuminance" = "Освещённость";
+"Brightness" = "Яркость";
+"Current brightness" = "Текущая яркость";
+"General" = "Общие";
+"Saved" = "Сохранён";
+"Token" = "Токен";

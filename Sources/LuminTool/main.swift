@@ -369,96 +369,64 @@ struct SettingsView: View {
     @State private var language = AppLanguage(appleLanguages: UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?["AppleLanguages"] as? [String])
     @State private var languageChanged = false
 
-    private var formHeight: CGFloat {
+    @State private var advanced = false
+
+    private var brightnessNote: String? {
+        [L("Auto brightness on"), L("Auto brightness paused")].contains(model.displayStatus) ? nil : model.displayStatus
+    }
+
+    private var warning: String? {
         switch model.config.source {
-        case .homeAssistant: return 345
-        case .mqtt: return 425
-        case .serial: return 265
-        case .esphome: return 385
+        case .homeAssistant:
+            return (try? HomeAssistantEndpoint(server))?.base.scheme == "http"
+                ? L("HTTP does not encrypt the token. Use HTTPS for a secure connection.") : nil
+        case .mqtt:
+            return !mqttUser.isEmpty && (try? MQTTEndpoint(broker))?.tls == false
+                ? L("The password is sent unencrypted. Use mqtts:// for a secure connection.") : nil
+        case .esphome:
+            return !esphomeUser.isEmpty && (try? ESPHomeEndpoint(esphomeAddress))?.base.scheme == "http"
+                ? L("The password may be sent unencrypted over http.") : nil
+        case .serial:
+            return nil
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("LuminTool").font(.largeTitle.bold())
-            Text("Monitor brightness from an illuminance sensor.").foregroundStyle(.secondary)
-            Form {
+        Form {
+            Section {
                 Picker("Source", selection: Binding(get: { model.config.source }, set: { error = ""; model.chooseSource($0) })) {
                     Text(verbatim: "Home Assistant").tag(SourceKind.homeAssistant)
                     Text(verbatim: "MQTT").tag(SourceKind.mqtt)
                     Text(verbatim: "USB").tag(SourceKind.serial)
                     Text(verbatim: "ESPHome").tag(SourceKind.esphome)
                 }
-                if model.config.source == .homeAssistant {
-                    TextField("Home Assistant", text: $server)
-                    SecureField(model.hasToken ? L("New token (optional)") : L("Long-lived token"), text: $token)
-                    HStack {
-                        Button("Connect") {
-                            do { try model.connect(server: server, token: token); token = ""; error = "" }
-                            catch { self.error = error.localizedDescription }
-                        }.keyboardShortcut(.defaultAction)
-                        Button("Create token") {
-                            if let endpoint = try? HomeAssistantEndpoint(server) {
-                                NSWorkspace.shared.open(endpoint.base.appendingPathComponent("profile/security"))
-                            }
-                        }
-                    }
-                    Picker("Sensor", selection: Binding(get: { model.config.entity }, set: model.chooseSensor)) {
-                        Text("Auto").tag("")
-                        if !model.config.entity.isEmpty && !model.sensors.contains(where: { $0.id == model.config.entity }) {
-                            Text(model.config.entity).tag(model.config.entity)
-                        }
-                        ForEach(model.sensors) { sensor in Text("\(sensor.name) — \(sensor.id)").tag(sensor.id) }
-                    }
+                switch model.config.source {
+                case .homeAssistant: homeAssistantFields
+                case .mqtt: mqttFields
+                case .esphome: esphomeFields
+                case .serial: serialFields
                 }
-                if model.config.source == .mqtt {
-                    TextField("Broker", text: $broker, prompt: Text(verbatim: "mqtt://homeassistant.local"))
-                    TextField("Login", text: $mqttUser)
-                    SecureField(model.hasMQTTPassword ? L("New password (optional)") : L("Password"), text: $mqttPassword)
-                    TextField("Topic", text: $topic)
-                    TextField("JSON key", text: $keyPath, prompt: Text("Auto"))
-                    Button("Connect") {
-                        do {
-                            try model.connectMQTT(broker: broker, username: mqttUser, password: mqttPassword, topic: topic, keyPath: keyPath)
-                            mqttPassword = ""
-                            error = ""
-                        } catch { self.error = error.localizedDescription }
-                    }.keyboardShortcut(.defaultAction)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Circle().fill(model.lux == nil ? Color.orange : Color.green).frame(width: 8, height: 8)
+                    Text(verbatim: model.sourceStatus).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
                 }
-                if model.config.source == .esphome {
-                    TextField("Address", text: $esphomeAddress, prompt: Text(verbatim: "sensor.local"))
-                    TextField("Login", text: $esphomeUser)
-                    SecureField(model.hasESPHomePassword ? L("New password (optional)") : L("Password"), text: $esphomePassword)
-                    Button("Connect") {
-                        do {
-                            try model.connectESPHome(address: esphomeAddress, username: esphomeUser, password: esphomePassword)
-                            esphomePassword = ""
-                            error = ""
-                        } catch { self.error = error.localizedDescription }
-                    }.keyboardShortcut(.defaultAction)
-                    Picker("Sensor", selection: Binding(get: { model.config.esphome.sensor }, set: model.chooseESPHomeSensor)) {
-                        Text("Auto").tag("")
-                        if !model.config.esphome.sensor.isEmpty && !model.sensors.contains(where: { $0.id == model.config.esphome.sensor }) {
-                            Text(verbatim: model.config.esphome.sensor).tag(model.config.esphome.sensor)
-                        }
-                        ForEach(model.sensors) { sensor in Text(verbatim: sensor.name).tag(sensor.id) }
-                    }
+                LabeledContent("Illuminance") {
+                    Text(verbatim: model.lux.map { String(format: "%.1f lx", $0) } ?? "—").monospacedDigit()
                 }
-                if model.config.source == .serial {
-                    HStack {
-                        Picker("Port", selection: Binding(get: { model.config.serial.port }, set: model.chooseSerialPort)) {
-                            Text("Choose a port").tag("")
-                            if !model.config.serial.port.isEmpty && !model.serialPorts.contains(model.config.serial.port) {
-                                Text(verbatim: model.config.serial.port).tag(model.config.serial.port)
-                            }
-                            ForEach(model.serialPorts, id: \.self) { Text(verbatim: $0).tag($0) }
-                        }
-                        Button("Refresh") { model.refreshSerialPorts() }
+            } header: {
+                Text("Light sensor")
+            } footer: {
+                if warning != nil || !error.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let warning { Label(warning, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                        if !error.isEmpty { Label(error, systemImage: "xmark.octagon.fill").foregroundStyle(.red) }
                     }
-                    Picker("Speed", selection: Binding(get: { model.config.serial.baud }, set: model.chooseSerialBaud)) {
-                        ForEach([9600, 19200, 38400, 57600, 115200], id: \.self) { Text(verbatim: String($0)).tag($0) }
-                    }
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
                 }
+            }
+            Section {
                 Picker("Monitor", selection: Binding(get: { model.config.monitor }, set: model.chooseMonitor)) {
                     Text("Choose a monitor").tag("")
                     if !model.config.monitor.isEmpty && !model.monitors.contains(where: { $0.id == model.config.monitor }) {
@@ -467,6 +435,20 @@ struct SettingsView: View {
                     ForEach(model.monitors) { monitor in Text(monitor.name).tag(monitor.id) }
                 }
                 Toggle("Auto brightness", isOn: Binding(get: { model.config.enabled }, set: { _ in model.toggleEnabled() }))
+                LabeledContent("Current brightness") {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(verbatim: model.brightness.map { String(format: "%.0f%%", $0 * 100) } ?? "—").monospacedDigit()
+                        if let brightnessNote { Text(verbatim: brightnessNote).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }
+            } header: {
+                Text("Brightness")
+            } footer: {
+                Text("Set the brightness you like, and LuminTool remembers it for this light level.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
+            }
+            Section("General") {
                 Picker("Language", selection: $language) {
                     Text("System").tag(AppLanguage.system)
                     Text(verbatim: "English").tag(AppLanguage.english)
@@ -486,40 +468,113 @@ struct SettingsView: View {
                         Button("Restart") { restart() }
                     }
                 }
-            }.formStyle(.grouped).frame(height: formHeight + (languageChanged ? 40 : 0))
-            if model.config.source == .homeAssistant, (try? HomeAssistantEndpoint(server))?.base.scheme == "http" {
-                Text("HTTP does not encrypt the token. Use HTTPS for a secure connection.")
-                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
-            if model.config.source == .mqtt, !mqttUser.isEmpty, (try? MQTTEndpoint(broker))?.tls == false {
-                Text("The password is sent unencrypted. Use mqtts:// for a secure connection.")
-                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-            }
-            if model.config.source == .esphome, !esphomeUser.isEmpty, (try? ESPHomeEndpoint(esphomeAddress))?.base.scheme == "http" {
-                Text("The password may be sent unencrypted over http.")
-                    .font(.callout).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(model.sourceStatus)
-                Text(model.displayStatus)
-                Text("\(model.lux.map { String(format: "%.1f lx", $0) } ?? "— lx") · \(model.brightness.map { String(format: "%.0f%%", $0 * 100) } ?? "—%")")
-                    .font(.system(.body, design: .monospaced))
-                if !error.isEmpty { Text(error).foregroundStyle(.red) }
-            }.font(.callout)
-            Text("Set the brightness you like, and LuminTool remembers it for this light level.")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(24)
-        .frame(width: 590)
+        .formStyle(.grouped)
+        .frame(width: 416)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             server = model.config.server
             broker = model.config.mqtt.broker
             mqttUser = model.config.mqtt.username
             topic = model.config.mqtt.topic
             keyPath = model.config.mqtt.keyPath
+            advanced = !keyPath.isEmpty
             esphomeAddress = model.config.esphome.address
             esphomeUser = model.config.esphome.username
             model.refreshSerialPorts()
+        }
+    }
+
+    @ViewBuilder private var homeAssistantFields: some View {
+        TextField("Address", text: $server, prompt: Text(verbatim: "http://homeassistant.local:8123"))
+        SecureField("Token", text: $token, prompt: Text(model.hasToken ? "Saved" : "Long-lived token"))
+        HStack {
+            Spacer()
+            Button("Create token") {
+                if let endpoint = try? HomeAssistantEndpoint(server) {
+                    NSWorkspace.shared.open(endpoint.base.appendingPathComponent("profile/security"))
+                }
+            }
+            Button("Connect") {
+                do { try model.connect(server: server, token: token); token = ""; error = "" }
+                catch { self.error = error.localizedDescription }
+            }.keyboardShortcut(.defaultAction)
+        }
+        Picker("Sensor", selection: Binding(get: { model.config.entity }, set: model.chooseSensor)) {
+            Text("Auto").tag("")
+            if !model.config.entity.isEmpty && !model.sensors.contains(where: { $0.id == model.config.entity }) {
+                Text(model.config.entity).tag(model.config.entity)
+            }
+            ForEach(model.sensors) { sensor in Text("\(sensor.name) — \(sensor.id)").tag(sensor.id) }
+        }
+    }
+
+    @ViewBuilder private var mqttFields: some View {
+        TextField("Broker", text: $broker, prompt: Text(verbatim: "mqtt://homeassistant.local"))
+        TextField("Login", text: $mqttUser, prompt: Text("Optional"))
+        SecureField("Password", text: $mqttPassword, prompt: Text(model.hasMQTTPassword ? "Saved" : "Optional"))
+        TextField("Topic", text: $topic, prompt: Text(verbatim: "zigbee2mqtt/sensor"))
+        Button { advanced.toggle() } label: {
+            HStack {
+                Text("Advanced")
+                Spacer()
+                Image(systemName: advanced ? "chevron.up" : "chevron.down").foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        if advanced {
+            TextField("JSON key", text: $keyPath, prompt: Text("Auto"))
+        }
+        HStack {
+            Spacer()
+            Button("Connect") {
+                do {
+                    try model.connectMQTT(broker: broker, username: mqttUser, password: mqttPassword, topic: topic, keyPath: keyPath)
+                    mqttPassword = ""
+                    error = ""
+                } catch { self.error = error.localizedDescription }
+            }.keyboardShortcut(.defaultAction)
+        }
+    }
+
+    @ViewBuilder private var esphomeFields: some View {
+        TextField("Address", text: $esphomeAddress, prompt: Text(verbatim: "sensor.local"))
+        TextField("Login", text: $esphomeUser, prompt: Text("Optional"))
+        SecureField("Password", text: $esphomePassword, prompt: Text(model.hasESPHomePassword ? "Saved" : "Optional"))
+        HStack {
+            Spacer()
+            Button("Connect") {
+                do {
+                    try model.connectESPHome(address: esphomeAddress, username: esphomeUser, password: esphomePassword)
+                    esphomePassword = ""
+                    error = ""
+                } catch { self.error = error.localizedDescription }
+            }.keyboardShortcut(.defaultAction)
+        }
+        Picker("Sensor", selection: Binding(get: { model.config.esphome.sensor }, set: model.chooseESPHomeSensor)) {
+            Text("Auto").tag("")
+            if !model.config.esphome.sensor.isEmpty && !model.sensors.contains(where: { $0.id == model.config.esphome.sensor }) {
+                Text(verbatim: model.config.esphome.sensor).tag(model.config.esphome.sensor)
+            }
+            ForEach(model.sensors) { sensor in Text(verbatim: sensor.name).tag(sensor.id) }
+        }
+    }
+
+    @ViewBuilder private var serialFields: some View {
+        HStack {
+            Picker("Port", selection: Binding(get: { model.config.serial.port }, set: model.chooseSerialPort)) {
+                Text("Choose a port").tag("")
+                if !model.config.serial.port.isEmpty && !model.serialPorts.contains(model.config.serial.port) {
+                    Text(verbatim: model.config.serial.port).tag(model.config.serial.port)
+                }
+                ForEach(model.serialPorts, id: \.self) { Text(verbatim: $0).tag($0) }
+            }
+            Button("Refresh") { model.refreshSerialPorts() }
+        }
+        Picker("Speed", selection: Binding(get: { model.config.serial.baud }, set: model.chooseSerialBaud)) {
+            ForEach([9600, 19200, 38400, 57600, 115200], id: \.self) { Text(verbatim: String($0)).tag($0) }
         }
     }
 
@@ -670,6 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(nil)
     }
 
     @objc private func toggle() { model.toggleEnabled() }
