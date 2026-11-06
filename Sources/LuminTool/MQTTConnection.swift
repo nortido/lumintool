@@ -76,8 +76,7 @@ private final class Link: @unchecked Sendable {
 @MainActor
 final class MQTTConnection {
     @MainActor private final class Health {
-        var lastReceived = ProcessInfo.processInfo.systemUptime
-        var ready = false
+        var watchdog = LinkWatchdog(now: ProcessInfo.processInfo.systemUptime)
         var timedOut = false
     }
     var onLux: ((Double?) -> Void)?
@@ -105,16 +104,18 @@ final class MQTTConnection {
         let onStatus = onStatus
         let clientID = clientID
         task = Task { @MainActor [weak self] in
+            var grace = OutageGrace()
             while !Task.isCancelled {
                 onStatus?(L("Connecting to MQTT…"))
                 do {
                     try await Self.session(endpoint: endpoint, username: username, password: password, topic: topic,
                                            keyPath: keyPath, clientID: clientID, onLink: { [weak self] in self?.link = $0 },
-                                           onLux: onLux, onStatus: onStatus)
+                                           onReady: { grace.restored() }, onLux: onLux, onStatus: onStatus)
                     return
                 } catch {
                     guard !Task.isCancelled else { return }
-                    onLux?(nil)
+                    // Zigbee2MQTT publishes without retain by default, so a value dropped on a short reconnect may not come back for an hour
+                    if grace.lost(now: ProcessInfo.processInfo.systemUptime) { onLux?(nil) }
                     onStatus?(String(format: L("No connection: %@"), error.localizedDescription))
                     do { try await Task.sleep(for: .seconds(3)) } catch { return }
                 }
@@ -123,24 +124,21 @@ final class MQTTConnection {
     }
 
     private static func session(endpoint: MQTTEndpoint, username: String, password: String, topic: String, keyPath: String,
-                                clientID: String, onLink: (Link) -> Void, onLux: ((Double?) -> Void)?,
+                                clientID: String, onLink: (Link) -> Void, onReady: () -> Void, onLux: ((Double?) -> Void)?,
                                 onStatus: ((String) -> Void)?) async throws {
         let link = Link(endpoint)
         onLink(link)
         let health = Health()
-        let started = health.lastReceived
         let watchdog = Task { @MainActor in
-            var lastPing = started
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                if (!health.ready && now - started > 20) || now - health.lastReceived > 35 {
+                switch health.watchdog.tick(now: ProcessInfo.processInfo.systemUptime) {
+                case .wait: break
+                case .timeout:
                     health.timedOut = true
                     link.cancel()
                     return
-                }
-                if health.ready && now - lastPing >= 15 {
-                    lastPing = now
+                case .ping:
                     do { try await link.send(MQTT.pingRequest) } catch { link.cancel(); return }
                 }
             }
@@ -152,7 +150,7 @@ final class MQTTConnection {
         do {
             try await link.ready()
             try Task.checkCancellation()
-            try await link.send(MQTT.connect(clientID: clientID, username: username, password: password, keepAlive: 30))
+            try await link.send(MQTT.connect(clientID: clientID, username: username, password: password, keepAlive: 60))
             try Task.checkCancellation()
             var reader = MQTTFrameReader()
             var accepted = false
@@ -160,7 +158,7 @@ final class MQTTConnection {
             while true {
                 let chunk = try await link.receive()
                 try Task.checkCancellation()
-                health.lastReceived = ProcessInfo.processInfo.systemUptime
+                health.watchdog.received(now: ProcessInfo.processInfo.systemUptime)
                 for packet in try reader.append(chunk) {
                     switch packet {
                     case .connAck(let code):
@@ -181,7 +179,8 @@ final class MQTTConnection {
                         guard let granted = codes.first, granted <= 2 else {
                             throw LuminToolError.message(L("The MQTT broker rejected the topic."))
                         }
-                        health.ready = true
+                        health.watchdog.ready(now: ProcessInfo.processInfo.systemUptime)
+                        onReady()
                         onStatus?(L("MQTT connected"))
                     case .publish(let name, let payload):
                         guard accepted, name == topic else { continue }

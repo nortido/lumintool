@@ -39,6 +39,7 @@ final class AppModel: ObservableObject {
     private var generation = 0
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var sleeping = false
+    private var sourceRunning = false
 
     init() {
         config = UserDefaults.standard.data(forKey: "configuration")
@@ -123,17 +124,25 @@ final class AppModel: ObservableObject {
 
     func refreshMonitors() {
         monitors = Monitor.connected()
-        start()
+        // Screen changes fire on every monitor sleep and wake; reconnecting the source there drops a value MQTT may not resend
+        guard sourceRunning else { start(); return }
+        stopControl()
+        startControl()
     }
 
     func stop() {
-        generation += 1
-        controlTask?.cancel()
-        controlTask = nil
+        stopControl()
+        sourceRunning = false
         ha.stop()
         mqtt.stop()
         serial.stop()
         esphome.stop()
+    }
+
+    private func stopControl() {
+        generation += 1
+        controlTask?.cancel()
+        controlTask = nil
         engine.resetObservation()
     }
 
@@ -181,6 +190,11 @@ final class AppModel: ObservableObject {
                 esphome.start(endpoint: endpoint, username: username, password: password ?? "", selected: config.esphome.sensor)
             } catch { sourceStatus = error.localizedDescription }
         }
+        sourceRunning = true
+        startControl()
+    }
+
+    private func startControl() {
         let epoch = generation
         controlTask = Task { @MainActor [weak self] in
             let clock = ContinuousClock()
@@ -568,8 +582,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.brightnessItem.title = value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable")
             self?.updateIcon(value)
         }.store(in: &subscriptions)
-        model.$displayStatus.sink { [weak self] value in self?.displayStatusItem.title = value }
-            .store(in: &subscriptions)
+        model.$displayStatus.sink { [weak self] value in
+            self?.displayStatusItem.title = value
+            self?.displayStatusItem.isHidden = [L("Auto brightness on"), L("Auto brightness paused")].contains(value)
+        }.store(in: &subscriptions)
     }
 
     private func updateIcon(_ brightness: Double?) {
