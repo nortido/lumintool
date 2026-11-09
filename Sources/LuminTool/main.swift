@@ -425,8 +425,7 @@ struct SettingsView: View {
     }
 
     private var version: String? {
-        guard let info = Bundle.main.infoDictionary, let short = info["CFBundleShortVersionString"] as? String else { return nil }
-        return (info["CFBundleVersion"] as? String).map { "\(short) (\($0))" } ?? short
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
     private var warning: String? {
