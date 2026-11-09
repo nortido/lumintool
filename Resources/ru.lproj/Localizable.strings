@@ -48,7 +48,6 @@
 "Monitor" = "Монитор";
 "Auto brightness" = "Автояркость";
 "Could not read the token from Keychain (%d)." = "Не удалось прочитать токен из Связки ключей (%d).";
-"Could not update the token (%d)." = "Не удалось обновить токен (%d).";
 "Could not save the token (%d)." = "Не удалось сохранить токен (%d).";
 "No connection: %@" = "Нет связи: %@";
 "macOS returned invalid brightness (%d)." = "macOS не вернула корректную яркость (%d).";
@@ -129,3 +128,4 @@
 "Could not install the update." = "Не удалось установить обновление.";
 "macOS blocked the update." = "Обновление заблокировано macOS.";
 "Version %@ is installed. Quit LuminTool and open it again." = "Версия %@ установлена. Закройте LuminTool и откройте снова.";
+"Could not read the file with saved passwords." = "Не удалось прочитать файл с сохранёнными паролями.";

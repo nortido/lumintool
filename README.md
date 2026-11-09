@@ -16,7 +16,7 @@ LuminTool is a small macOS menu bar app that sets the brightness of an external 
 - USB: a board that prints one lux number per line, at least every 10 seconds, at 115200 baud by default. See [examples/bh1750-serial](examples/bh1750-serial/bh1750-serial.ino) for a BH1750 sketch.
 - ESPHome: enable `web_server:` on the device and use its address, for example `http://name.local`. A login is optional.
 
-LuminTool keeps the Home Assistant token and the passwords in the macOS Keychain. Brightness goes through the private DisplayServices framework, so a macOS update may break it.
+LuminTool keeps the Home Assistant token and the passwords in `~/Library/Application Support/LuminTool/secrets.json`, a file only your user account can read. Older versions kept them in the Keychain. The new version moves each saved value into the file the first time it needs it, and macOS may ask for your Keychain password at that moment. Brightness goes through the private DisplayServices framework, so a macOS update may break it.
 
 ## License
 

@@ -4,36 +4,40 @@ import LuminToolCore
 
 enum TokenStore {
     static let homeAssistantService = "local.nortido.LuminTool.homeassistant"
-
-    private static func query(_ account: String, service: String) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: account]
-    }
+    // The preview and the harness swap these so they never touch the real file or Keychain.
+    static var store = SecretStore(directory: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("LuminTool", isDirectory: true))
+    static var legacy: LegacySecrets = KeychainLegacySecrets()
 
     static func read(account: String, service: String = homeAssistantService) throws -> String? {
-        var request = query(account, service: service)
+        try store.secret(service: service, account: account, legacy: legacy)
+    }
+
+    static func save(_ token: String, account: String, service: String = homeAssistantService) throws {
+        try store.save(token, service: service, account: account)
+    }
+}
+
+struct KeychainLegacySecrets: LegacySecrets {
+    var scope: [String: Any] = [:]
+
+    private func query(service: String, account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: account].merging(scope) { current, _ in current }
+    }
+
+    func read(service: String, account: String) -> LegacySecret {
+        var request = query(service: service, account: account)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = item as? Data, let token = String(data: data, encoding: .utf8) else {
-            throw LuminToolError.message(String(format: L("Could not read the token from Keychain (%d)."), status))
-        }
-        return token
+        return LegacySecret(status: status, data: item as? Data)
     }
 
-    static func save(_ token: String, account: String, service: String = homeAssistantService) throws {
-        let data = Data(token.utf8)
-        let status = SecItemUpdate(query(account, service: service) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status == errSecSuccess { return }
-        guard status == errSecItemNotFound else { throw LuminToolError.message(String(format: L("Could not update the token (%d)."), status)) }
-        var request = query(account, service: service)
-        request[kSecValueData as String] = data
-        request[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let added = SecItemAdd(request as CFDictionary, nil)
-        guard added == errSecSuccess else { throw LuminToolError.message(String(format: L("Could not save the token (%d)."), added)) }
+    func delete(service: String, account: String) {
+        SecItemDelete(query(service: service, account: account) as CFDictionary)
     }
 }
 

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 public struct AppVersion: Comparable {
     public let parts: [Int]
@@ -203,5 +204,15 @@ public enum UpdateSchedule {
 public enum UpdateLoginItem {
     public static func shouldRegister(flag: Bool, enabledNow: Bool) -> Bool {
         flag && !enabledNow
+    }
+}
+
+public enum UpdateSignature: Equatable {
+    case adhoc, certificate, unknown
+
+    public static func classify(flags: UInt32?, certificates: Int) -> UpdateSignature {
+        guard let flags else { return .unknown }
+        if flags & SecCodeSignatureFlags.adhoc.rawValue != 0 { return .adhoc }
+        return certificates > 0 ? .certificate : .unknown
     }
 }

@@ -201,4 +201,14 @@ final class UpdateTests: XCTestCase {
         XCTAssertFalse(UpdateLoginItem.shouldRegister(flag: false, enabledNow: false))
         XCTAssertFalse(UpdateLoginItem.shouldRegister(flag: false, enabledNow: true))
     }
+
+    func testSignatureClassification() {
+        XCTAssertEqual(UpdateSignature.classify(flags: 0x2, certificates: 0), .adhoc)
+        XCTAssertEqual(UpdateSignature.classify(flags: 0x20002, certificates: 0), .adhoc)
+        XCTAssertEqual(UpdateSignature.classify(flags: 0x2, certificates: 1), .adhoc)
+        XCTAssertEqual(UpdateSignature.classify(flags: 0, certificates: 1), .certificate)
+        XCTAssertEqual(UpdateSignature.classify(flags: 0x10000, certificates: 2), .certificate)
+        XCTAssertEqual(UpdateSignature.classify(flags: nil, certificates: 1), .unknown)
+        XCTAssertEqual(UpdateSignature.classify(flags: 0, certificates: 0), .unknown)
+    }
 }

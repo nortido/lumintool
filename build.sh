@@ -41,7 +41,14 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 PLIST
 xattr -dr com.apple.FinderInfo "$app_dir" 2>/dev/null || true
 xattr -dr com.apple.ResourceFork "$app_dir" 2>/dev/null || true
-codesign --force --sign - "$app_dir"
+sign_identity="LuminTool Code Signing"
+identities=$(security find-identity -p codesigning 2>/dev/null || true)
+if [[ "$identities" == *"\"$sign_identity\""* ]]; then
+    codesign --force --timestamp=none --sign "$sign_identity" "$app_dir"
+else
+    print -u2 -r -- "warning: signing identity \"$sign_identity\" not found, signing ad-hoc"
+    codesign --force --sign - "$app_dir"
+fi
 codesign --verify --deep --strict "$app_dir"
 touch "$app_dir"
 mkdir -p "$PWD/build"

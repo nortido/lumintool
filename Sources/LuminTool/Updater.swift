@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import LuminToolCore
+import Security
 import ServiceManagement
 
 enum UpdatePhase: Equatable {
@@ -13,6 +14,12 @@ enum UpdatePhase: Equatable {
     case installing(String)
     case failed(UpdateProblem)
     case installed(String)
+}
+
+enum UpdatePin {
+    case none
+    case requirement(SecRequirement)
+    case unknown
 }
 
 private final class AllowedRedirects: NSObject, URLSessionTaskDelegate {
@@ -39,6 +46,7 @@ final class Updater {
     private let defaults: UserDefaults
     private let relaunch: @MainActor (URL, () -> Void) throws -> Void
     private let toolTimeout: TimeInterval
+    private let pin: UpdatePin
     private var enabled: () -> Bool = { false }
     private var checkTask: Task<Void, Never>?
     private var manualCheck = false
@@ -51,7 +59,7 @@ final class Updater {
          system: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion,
          defaults: UserDefaults = .standard,
          relaunch: @escaping @MainActor (URL, () -> Void) throws -> Void = Updater.relaunch,
-         toolTimeout: TimeInterval = 120) {
+         toolTimeout: TimeInterval = 120, pin: UpdatePin = Updater.runningPin()) {
         self.source = source
         self.bundleURL = bundleURL
         self.currentVersion = currentVersion
@@ -59,6 +67,7 @@ final class Updater {
         self.defaults = defaults
         self.relaunch = relaunch
         self.toolTimeout = toolTimeout
+        self.pin = pin
     }
 
     deinit {
@@ -158,6 +167,35 @@ final class Updater {
         return UpdateBundle.installable(path: bundle.path, identifier: identifier, writable: writable)
     }
 
+    nonisolated static func runningPin() -> UpdatePin {
+        var code: SecCode?
+        var staticCode: SecStaticCode?
+        var info: CFDictionary?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let info = info as? [String: Any]
+        else { return .unknown }
+        let flags = (info[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value
+        let certificates = (info[kSecCodeInfoCertificates as String] as? [Any])?.count ?? 0
+        switch UpdateSignature.classify(flags: flags, certificates: certificates) {
+        // An ad-hoc requirement is this build's cdhash, so pinning it would reject every update.
+        case .adhoc: return .none
+        case .unknown: return .unknown
+        case .certificate:
+            var requirement: SecRequirement?
+            guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess, let requirement else { return .unknown }
+            return .requirement(requirement)
+        }
+    }
+
+    static func satisfies(_ app: URL, _ requirement: SecRequirement) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(app as CFURL, [], &code) == errSecSuccess, let code else { return false }
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSCheckNestedCode)
+        return SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess
+    }
+
     func prepare(_ offer: UpdateOffer) async throws -> (staging: URL, app: URL) {
         let files = FileManager.default
         guard let staging = try? files.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: bundleURL, create: true) else {
@@ -178,6 +216,12 @@ final class Updater {
             else { throw UpdateProblem.verification }
             try UpdateBundle.verify(info, version: offer.version, current: current, system: system)
             guard await Self.run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], timeout: toolTimeout) == 0 else { throw UpdateProblem.verification }
+            switch pin {
+            case .none: break
+            case .requirement(let requirement):
+                guard Self.satisfies(app, requirement) else { throw UpdateProblem.verification }
+            case .unknown: throw UpdateProblem.verification
+            }
             return (staging, app)
         } catch {
             try? files.removeItem(at: staging)
