@@ -405,6 +405,11 @@ struct SettingsView: View {
         [L("Auto brightness on"), L("Auto brightness paused")].contains(model.displayStatus) ? nil : model.displayStatus
     }
 
+    private var version: String? {
+        guard let info = Bundle.main.infoDictionary, let short = info["CFBundleShortVersionString"] as? String else { return nil }
+        return (info["CFBundleVersion"] as? String).map { "\(short) (\($0))" } ?? short
+    }
+
     private var warning: String? {
         switch model.config.source {
         case .homeAssistant:
@@ -495,10 +500,16 @@ struct SettingsView: View {
             } header: {
                 Text("General")
             } footer: {
-                if !loginError.isEmpty {
-                    Label(loginError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
-                        .font(.callout).fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
+                VStack(spacing: 12) {
+                    if !loginError.isEmpty {
+                        Label(loginError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                            .font(.callout).fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
+                    }
+                    if let version {
+                        Text(verbatim: "LuminTool \(version)").font(.caption).foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity).padding(.top, 8)
+                    }
                 }
             }
         }
