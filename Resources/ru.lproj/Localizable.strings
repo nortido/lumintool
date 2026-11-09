@@ -10,9 +10,9 @@
 "Enter an http:// or https:// address without login, password or parameters." = "Укажите адрес http:// или https:// без логина, пароля и параметров.";
 "Invalid Home Assistant address." = "Некорректный адрес Home Assistant.";
 "Choose an external monitor." = "Выберите внешний монитор.";
-"The brightness service is not available in this macOS version." = "Служба яркости недоступна в этой версии macOS.";
-"Could not get the list of monitors from macOS." = "Не удалось получить список мониторов macOS.";
-"macOS does not support system brightness for this monitor on the current connection." = "macOS не поддерживает системную яркость этого монитора при текущем подключении.";
+"macOS brightness service not found." = "Служба яркости macOS не найдена.";
+"Could not get the monitor list." = "Не удалось получить список мониторов.";
+"macOS does not allow brightness control." = "macOS не даёт менять яркость монитора.";
 "The external monitor is disconnected." = "Внешний монитор отключён.";
 "Brightness must be from 0 to 100%." = "Яркость должна быть от 0 до 100%.";
 "Enter a Home Assistant token in Settings" = "Введите токен Home Assistant в настройках";
@@ -127,5 +127,5 @@
 "The update failed verification." = "Обновление не прошло проверку.";
 "Could not install the update." = "Не удалось установить обновление.";
 "macOS blocked the update." = "Обновление заблокировано macOS.";
-"Version %@ is installed. Quit LuminTool and open it again." = "Версия %@ установлена. Закройте LuminTool и откройте снова.";
+"Restart LuminTool for version %@" = "Перезапустите LuminTool для версии %@";
 "Could not read the file with saved passwords." = "Не удалось прочитать файл с сохранёнными паролями.";

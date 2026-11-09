@@ -30,19 +30,19 @@ public actor SystemBrightness {
         try Task.checkCancellation()
         guard !uuid.isEmpty else { throw LuminToolError.message(L("Choose an external monitor.")) }
         guard canChange != nil, get != nil, set != nil else {
-            throw LuminToolError.message(L("The brightness service is not available in this macOS version."))
+            throw LuminToolError.message(L("macOS brightness service not found."))
         }
         var displays = [CGDirectDisplayID](repeating: 0, count: 32)
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(UInt32(displays.count), &displays, &count) == .success else {
-            throw LuminToolError.message(L("Could not get the list of monitors from macOS."))
+            throw LuminToolError.message(L("Could not get the monitor list."))
         }
         for display in displays.prefix(Int(count)) where CGDisplayIsBuiltin(display) == 0 {
             guard let id = CGDisplayCreateUUIDFromDisplayID(display)?.takeRetainedValue() else { continue }
             let identifier = CFUUIDCreateString(nil, id) as String
             if identifier.caseInsensitiveCompare(uuid) == .orderedSame {
                 guard canChange?(display) == true else {
-                    throw LuminToolError.message(L("macOS does not support system brightness for this monitor on the current connection."))
+                    throw LuminToolError.message(L("macOS does not allow brightness control."))
                 }
                 return display
             }

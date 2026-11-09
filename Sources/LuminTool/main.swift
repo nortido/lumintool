@@ -576,7 +576,7 @@ struct SettingsView: View {
         case .downloading: Text("Downloading the update…")
         case .installing: Text("Installing the update…")
         case .installed(let version):
-            Text(verbatim: String(format: L("Version %@ is installed. Quit LuminTool and open it again."), version))
+            Text(verbatim: String(format: L("Restart LuminTool for version %@"), version))
                 .fixedSize(horizontal: false, vertical: true)
         case .failed(let problem):
             Label(problem.message, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
@@ -740,11 +740,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func showIlluminance(_ value: Double?) {
-        illuminanceItem.title = value.map { String(format: L("Illuminance: %.1f lx"), $0) } ?? L("Sensor unavailable")
+        illuminanceItem.setWrappedTitle(value.map { String(format: L("Illuminance: %.1f lx"), $0) } ?? L("Sensor unavailable"))
     }
 
     private func showBrightness(_ value: Double?) {
-        brightnessItem.title = value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable")
+        brightnessItem.setWrappedTitle(value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable"))
     }
 
     private func bindStatusItems() {
@@ -759,7 +759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.showBrightness(self.model.brightness)
         }.store(in: &subscriptions)
         model.$displayStatus.sink { [weak self] value in
-            self?.displayStatusItem.title = value
+            self?.displayStatusItem.setWrappedTitle(value)
             self?.displayStatusItem.isHidden = [L("Auto brightness on"), L("Auto brightness paused")].contains(value)
         }.store(in: &subscriptions)
     }
@@ -833,21 +833,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .downloading: addUpdateItem(to: menu, title: L("Downloading the update…"), action: nil)
         case .installing: addUpdateItem(to: menu, title: L("Installing the update…"), action: nil)
         case .installed(let version):
-            addUpdateItem(to: menu, title: String(format: L("Version %@ is installed. Quit LuminTool and open it again."), version), action: nil)
+            addUpdateItem(to: menu, title: String(format: L("Restart LuminTool for version %@"), version), action: nil)
         case .failed(let problem) where problem != .unavailable && problem != .rateLimited:
             addUpdateItem(to: menu, title: problem.message, action: nil)
             addUpdateItem(to: menu, title: L("Open release page"), action: #selector(openReleasePage))
         default: break
         }
         for (title, action) in [(L("Settings"), #selector(showSettings)), (L("Reset calibration"), #selector(reset)), (L("Quit"), #selector(quit))] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            let item = NSMenuItem(title: "", action: action, keyEquivalent: "")
+            item.setWrappedTitle(title)
             item.target = self
             menu.addItem(item)
         }
     }
 
     private func addUpdateItem(to menu: NSMenu, title: String, action: Selector?) {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        let item = NSMenuItem(title: "", action: action, keyEquivalent: "")
+        item.setWrappedTitle(title)
         item.target = self
         item.isEnabled = action != nil
         menu.addItem(item)
@@ -907,5 +909,14 @@ if CommandLine.arguments.contains("--probe") {
         let delegate = AppDelegate()
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }
+    }
+}
+
+extension NSMenuItem {
+    // A plain title ignores line breaks; only an attributed title draws them
+    func setWrappedTitle(_ text: String) {
+        title = text
+        let wrapped = MenuText.title(text)
+        attributedTitle = wrapped == text ? nil : NSAttributedString(string: wrapped, attributes: [.font: NSFont.menuFont(ofSize: 0)])
     }
 }
