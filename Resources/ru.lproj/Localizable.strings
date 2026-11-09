@@ -55,8 +55,6 @@
 "macOS did not change the brightness (%d)." = "macOS не изменила яркость (%d).";
 "Language" = "Язык";
 "System" = "Системный";
-"Restart LuminTool to change the language." = "Перезапустите LuminTool, чтобы сменить язык.";
-"Restart" = "Перезапустить";
 "Source" = "Источник";
 "Connecting to MQTT…" = "Подключение к MQTT…";
 "MQTT connected" = "MQTT подключён";
@@ -110,3 +108,6 @@
 "General" = "Общие";
 "Saved" = "Сохранён";
 "Token" = "Токен";
+"Open at login" = "Открывать при входе";
+"Allow LuminTool in Login Items." = "Разрешите LuminTool в объектах входа.";
+"Open Login Items" = "Открыть объекты входа";

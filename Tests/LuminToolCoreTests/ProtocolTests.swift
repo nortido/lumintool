@@ -38,6 +38,22 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(AppLanguage(appleLanguages: ["de"]), .system)
     }
 
+    func testLanguageResolvesToBundledLocalization() {
+        XCTAssertEqual(AppLanguage.english.localization(systemPreferred: ["ru-RU"]), "en")
+        XCTAssertEqual(AppLanguage.russian.localization(systemPreferred: ["en-US"]), "ru")
+        XCTAssertEqual(AppLanguage.system.localization(systemPreferred: ["ru-RU", "en-US"]), "ru")
+        XCTAssertEqual(AppLanguage.system.localization(systemPreferred: ["de-DE", "ru-RU"]), "ru")
+        XCTAssertEqual(AppLanguage.system.localization(systemPreferred: ["de-DE"]), "en")
+        XCTAssertEqual(AppLanguage.system.localization(systemPreferred: []), "en")
+    }
+
+    func testStatusTextFindsItsKeyInAnyLanguage() {
+        let tables = [["Connecting to MQTT\u{2026}": "\u{41f}\u{43e}\u{434}\u{43a}\u{43b}\u{44e}\u{447}\u{435}\u{43d}\u{438}\u{435} \u{43a} MQTT\u{2026}"]]
+        XCTAssertEqual(LocalizedKey.find("Connecting to MQTT\u{2026}", in: tables), "Connecting to MQTT\u{2026}")
+        XCTAssertEqual(LocalizedKey.find("\u{41f}\u{43e}\u{434}\u{43a}\u{43b}\u{44e}\u{447}\u{435}\u{43d}\u{438}\u{435} \u{43a} MQTT\u{2026}", in: tables), "Connecting to MQTT\u{2026}")
+        XCTAssertNil(LocalizedKey.find("No connection: timeout", in: tables))
+    }
+
     func testCorruptCurveIsRejected() {
         let json = #"{"points":[{"lux":10,"brightness":0.5},{"lux":0,"brightness":0.2}],"isCalibrated":true}"#
         XCTAssertThrowsError(try JSONDecoder().decode(BrightnessCurve.self, from: Data(json.utf8)))

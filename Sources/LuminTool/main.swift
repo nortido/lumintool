@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import LuminToolCore
+import ServiceManagement
 
 struct Monitor: Identifiable {
     let id: String
@@ -29,6 +30,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasMQTTPassword = false
     @Published private(set) var hasESPHomePassword = false
     @Published private(set) var serialPorts: [String] = []
+    @Published private(set) var language = AppModel.storedLanguage
     private let brightnessService = SystemBrightness()
     private let ha = HomeAssistantConnection()
     private let mqtt = MQTTConnection()
@@ -120,6 +122,34 @@ final class AppModel: ObservableObject {
 
     private func saveCurve() {
         if let data = try? JSONEncoder().encode(engine.curve) { UserDefaults.standard.set(data, forKey: config.curveKey) }
+    }
+
+    static var storedLanguage: AppLanguage {
+        AppLanguage(appleLanguages: UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?["AppleLanguages"] as? [String])
+    }
+
+    static func localization(for language: AppLanguage) -> String {
+        let global = CFPreferencesCopyValue("AppleLanguages" as CFString, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        return language.localization(systemPreferred: global as? [String] ?? Locale.preferredLanguages)
+    }
+
+    static func applyLocalization(_ language: AppLanguage) {
+        Localization.bundle = Bundle.main.path(forResource: localization(for: language), ofType: "lproj").flatMap(Bundle.init(path:)) ?? .main
+    }
+
+    private static let translations = Bundle.main.path(forResource: "Localizable", ofType: "strings", inDirectory: nil, forLocalization: "ru")
+        .flatMap { NSDictionary(contentsOfFile: $0) as? [String: String] }.map { [$0] } ?? []
+
+    func chooseLanguage(_ value: AppLanguage) {
+        if let languages = value.appleLanguages {
+            UserDefaults.standard.set(languages, forKey: "AppleLanguages")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+        }
+        Self.applyLocalization(value)
+        if let key = LocalizedKey.find(sourceStatus, in: Self.translations) { sourceStatus = L(key) }
+        if let key = LocalizedKey.find(displayStatus, in: Self.translations) { displayStatus = L(key) }
+        language = value
     }
 
     func refreshMonitors() {
@@ -366,8 +396,8 @@ struct SettingsView: View {
     @State private var esphomeUser = ""
     @State private var esphomePassword = ""
     @State private var error = ""
-    @State private var language = AppLanguage(appleLanguages: UserDefaults.standard.persistentDomain(forName: Bundle.main.bundleIdentifier ?? "")?["AppleLanguages"] as? [String])
-    @State private var languageChanged = false
+    @State private var loginStatus = SMAppService.mainApp.status
+    @State private var loginError = ""
 
     @State private var advanced = false
 
@@ -448,32 +478,36 @@ struct SettingsView: View {
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
             }
-            Section("General") {
-                Picker("Language", selection: $language) {
+            Section {
+                Toggle("Open at login", isOn: Binding(get: { loginStatus == .enabled || loginStatus == .requiresApproval }, set: setOpenAtLogin))
+                if loginStatus == .requiresApproval {
+                    HStack {
+                        Text("Allow LuminTool in Login Items.").foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                    }
+                }
+                Picker("Language", selection: Binding(get: { model.language }, set: model.chooseLanguage)) {
                     Text("System").tag(AppLanguage.system)
                     Text(verbatim: "English").tag(AppLanguage.english)
                     Text(verbatim: "Русский").tag(AppLanguage.russian)
-                }.onChange(of: language) { _, value in
-                    if let languages = value.appleLanguages {
-                        UserDefaults.standard.set(languages, forKey: "AppleLanguages")
-                    } else {
-                        UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-                    }
-                    languageChanged = true
                 }
-                if languageChanged {
-                    HStack {
-                        Text("Restart LuminTool to change the language.").foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Restart") { restart() }
-                    }
+            } header: {
+                Text("General")
+            } footer: {
+                if !loginError.isEmpty {
+                    Label(loginError, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10)
                 }
             }
         }
         .formStyle(.grouped)
+        .environment(\.locale, Locale(identifier: AppModel.localization(for: model.language)))
         .frame(width: 416)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
+            loginStatus = SMAppService.mainApp.status
             server = model.config.server
             broker = model.config.mqtt.broker
             mqttUser = model.config.mqtt.username
@@ -578,16 +612,16 @@ struct SettingsView: View {
         }
     }
 
-    private func restart() {
-        model.stop()
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            DispatchQueue.main.async {
-                if error == nil { NSApp.terminate(nil) } else { model.start() }
-            }
+    private func setOpenAtLogin(_ enabled: Bool) {
+        do {
+            if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            loginError = ""
+        } catch {
+            loginError = error.localizedDescription
         }
+        loginStatus = SMAppService.mainApp.status
     }
+
 }
 
 @MainActor
@@ -629,13 +663,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.mainMenu = main
     }
 
+    private func showIlluminance(_ value: Double?) {
+        illuminanceItem.title = value.map { String(format: L("Illuminance: %.1f lx"), $0) } ?? L("Sensor unavailable")
+    }
+
+    private func showBrightness(_ value: Double?) {
+        brightnessItem.title = value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable")
+    }
+
     private func bindStatusItems() {
-        model.$lux.sink { [weak self] value in
-            self?.illuminanceItem.title = value.map { String(format: L("Illuminance: %.1f lx"), $0) } ?? L("Sensor unavailable")
-        }.store(in: &subscriptions)
+        model.$lux.sink { [weak self] value in self?.showIlluminance(value) }.store(in: &subscriptions)
         model.$brightness.sink { [weak self] value in
-            self?.brightnessItem.title = value.map { String(format: L("Brightness: %.0f%%"), $0 * 100) } ?? L("Brightness unavailable")
+            self?.showBrightness(value)
             self?.updateIcon(value)
+        }.store(in: &subscriptions)
+        model.$language.sink { [weak self] _ in
+            guard let self else { return }
+            self.showIlluminance(self.model.lux)
+            self.showBrightness(self.model.brightness)
         }.store(in: &subscriptions)
         model.$displayStatus.sink { [weak self] value in
             self?.displayStatusItem.title = value
@@ -760,6 +805,7 @@ if CommandLine.arguments.contains("--probe") {
     app.run()
 } else {
     MainActor.assumeIsolated {
+        AppModel.applyLocalization(AppModel.storedLanguage)
         let delegate = AppDelegate()
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }

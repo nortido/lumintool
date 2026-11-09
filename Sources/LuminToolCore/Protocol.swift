@@ -57,6 +57,15 @@ public enum AppLanguage: String, CaseIterable, Identifiable {
         }
     }
 
+    public func localization(systemPreferred: [String]) -> String {
+        switch self {
+        case .english: return "en"
+        case .russian: return "ru"
+        case .system:
+            return systemPreferred.lazy.map { String($0.prefix(2)) }.first { ["en", "ru"].contains($0) } ?? "en"
+        }
+    }
+
     public init(appleLanguages: [String]?) {
         switch appleLanguages?.first?.prefix(2) {
         case "en": self = .english
@@ -66,6 +75,20 @@ public enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+public enum Localization {
+    public static var bundle = Bundle.main
+}
+
+public enum LocalizedKey {
+    public static func find(_ text: String, in tables: [[String: String]]) -> String? {
+        for table in tables {
+            if table[text] != nil { return text }
+            if let key = table.first(where: { $0.value == text })?.key { return key }
+        }
+        return nil
+    }
+}
+
 public func L(_ key: String) -> String {
-    NSLocalizedString(key, bundle: .main, comment: "")
+    NSLocalizedString(key, bundle: Localization.bundle, comment: "")
 }
