@@ -30,8 +30,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>LuminTool</string>
 <key>CFBundleIconFile</key><string>LuminTool.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.4.0</string>
-<key>CFBundleVersion</key><string>13</string>
+<key>CFBundleShortVersionString</key><string>1.4.1</string>
+<key>CFBundleVersion</key><string>14</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -45,5 +45,5 @@ codesign --force --sign - "$app_dir"
 codesign --verify --deep --strict "$app_dir"
 touch "$app_dir"
 mkdir -p "$PWD/build"
-ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$PWD/build/LuminTool-1.4.0.zip"
-print -r -- "$PWD/build/LuminTool-1.4.0.zip"
+ditto -c -k --norsrc --noextattr --keepParent "$app_dir" "$PWD/build/LuminTool-1.4.1.zip"
+print -r -- "$PWD/build/LuminTool-1.4.1.zip"
