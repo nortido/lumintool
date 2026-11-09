@@ -34,6 +34,7 @@ public struct Configuration: Codable {
     public var mqtt = MQTTSettings()
     public var serial = SerialSettings()
     public var esphome = ESPHomeSettings()
+    public var checkUpdates = true
 
     public init() {}
 
@@ -48,6 +49,7 @@ public struct Configuration: Codable {
         mqtt = (try? values.decodeIfPresent(MQTTSettings.self, forKey: .mqtt)) ?? defaults.mqtt
         serial = (try? values.decodeIfPresent(SerialSettings.self, forKey: .serial)) ?? defaults.serial
         esphome = (try? values.decodeIfPresent(ESPHomeSettings.self, forKey: .esphome)) ?? defaults.esphome
+        checkUpdates = (try? values.decodeIfPresent(Bool.self, forKey: .checkUpdates)) ?? defaults.checkUpdates
     }
 
     public var hasSensor: Bool {

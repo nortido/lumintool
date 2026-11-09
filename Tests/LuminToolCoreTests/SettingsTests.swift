@@ -100,4 +100,27 @@ final class SettingsTests: XCTestCase {
         config.esphome.sensor = "illuminance"
         XCTAssertTrue(config.hasSensor)
     }
+
+    func testCheckUpdatesSurvivesDecode() throws {
+        XCTAssertFalse(try decode(#"{"checkUpdates":false}"#).checkUpdates)
+        var config = Configuration()
+        config.checkUpdates = false
+        let decoded = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
+        XCTAssertFalse(decoded.checkUpdates)
+    }
+
+    func testOldConfigurationChecksUpdates() throws {
+        let config = try decode(#"{"server":"http://ha.lan:8123","entity":"sensor.lux","monitor":"ABCD","enabled":false}"#)
+        XCTAssertTrue(config.checkUpdates)
+        XCTAssertEqual(config.server, "http://ha.lan:8123")
+        XCTAssertEqual(config.entity, "sensor.lux")
+        XCTAssertEqual(config.monitor, "ABCD")
+        XCTAssertFalse(config.enabled)
+    }
+
+    func testInvalidCheckUpdatesKeepsOtherFields() throws {
+        let config = try decode(#"{"server":"http://ha.lan:8123","checkUpdates":"no"}"#)
+        XCTAssertTrue(config.checkUpdates)
+        XCTAssertEqual(config.server, "http://ha.lan:8123")
+    }
 }

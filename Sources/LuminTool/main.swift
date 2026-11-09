@@ -31,11 +31,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasESPHomePassword = false
     @Published private(set) var serialPorts: [String] = []
     @Published private(set) var language = AppModel.storedLanguage
+    @Published private(set) var update = UpdatePhase.idle
     private let brightnessService = SystemBrightness()
     private let ha = HomeAssistantConnection()
     private let mqtt = MQTTConnection()
     private let serial = SerialConnection()
     private let esphome = ESPHomeConnection()
+    private let updater = Updater()
     private var engine = AdaptiveBrightness()
     private var controlTask: Task<Void, Never>?
     private var generation = 0
@@ -85,6 +87,7 @@ final class AppModel: ObservableObject {
             self?.engine.sensor(value)
         }
         esphome.onStatus = { [weak self] in self?.sourceStatus = $0 }
+        updater.onChange = { [weak self] in self?.update = $0 }
         refreshSerialPorts()
         let workspace = NSWorkspace.shared.notificationCenter
         observers.append((workspace, workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -375,6 +378,22 @@ final class AppModel: ObservableObject {
         start()
     }
 
+    func startUpdateChecks() {
+        updater.startAutomaticChecks(enabled: { [weak self] in self?.config.checkUpdates ?? false })
+    }
+
+    func checkForUpdates() { updater.check(manual: true) }
+
+    func installUpdate() { updater.install(beforeQuit: { [weak self] in self?.stop() }) }
+
+    func chooseCheckUpdates(_ on: Bool) {
+        config.checkUpdates = on
+        saveConfiguration()
+        if on { updater.checkIfDue() }
+    }
+
+    func openReleasePage() { NSWorkspace.shared.open(updater.source.page) }
+
     func resetCalibration() {
         stop()
         engine = AdaptiveBrightness()
@@ -497,6 +516,8 @@ struct SettingsView: View {
                     Text(verbatim: "English").tag(AppLanguage.english)
                     Text(verbatim: "Русский").tag(AppLanguage.russian)
                 }
+                Toggle("Check for updates automatically", isOn: Binding(get: { model.config.checkUpdates }, set: model.chooseCheckUpdates))
+                updateRow
             } header: {
                 Text("General")
             } footer: {
@@ -528,6 +549,49 @@ struct SettingsView: View {
             esphomeAddress = model.config.esphome.address
             esphomeUser = model.config.esphome.username
             model.refreshSerialPorts()
+        }
+    }
+
+    @ViewBuilder private var updateRow: some View {
+        if case .failed(let problem) = model.update, problem == .install || problem == .blocked {
+            VStack(alignment: .leading, spacing: 8) {
+                updateText
+                Button("Open release page") { model.openReleasePage() }.frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        } else {
+            HStack {
+                updateText
+                Spacer()
+                updateControl
+            }
+        }
+    }
+
+    @ViewBuilder private var updateText: some View {
+        switch model.update {
+        case .idle: Text("Updates")
+        case .checking: Text("Checking for updates…")
+        case .upToDate: Text("LuminTool is up to date")
+        case .available(let offer): Text(verbatim: String(format: L("Version %@ is available"), offer.version))
+        case .notInstallable(let version): Text(verbatim: String(format: L("Version %@ is available"), version))
+        case .downloading: Text("Downloading the update…")
+        case .installing: Text("Installing the update…")
+        case .installed(let version):
+            Text(verbatim: String(format: L("Version %@ is installed. Quit LuminTool and open it again."), version))
+                .fixedSize(horizontal: false, vertical: true)
+        case .failed(let problem):
+            Label(problem.message, systemImage: "xmark.octagon.fill").foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder private var updateControl: some View {
+        switch model.update {
+        case .checking, .downloading, .installing: ProgressView().controlSize(.small)
+        case .available: Button("Update") { model.installUpdate() }
+        case .notInstallable: Button("Open release page") { model.openReleasePage() }
+        case .installed: Button("Quit") { model.stop(); NSApp.terminate(nil) }
+        default: Button("Check now") { model.checkForUpdates() }
         }
     }
 
@@ -647,6 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var iconLevel = -1
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Updater.repairLoginItemAfterUpdate()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         let menu = NSMenu()
         menu.delegate = self
@@ -654,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         installEditMenu()
         bindStatusItems()
         model.start()
+        model.startUpdateChecks()
         if !model.config.hasSensor || (model.config.source == .homeAssistant && !model.hasToken) { showSettings() }
     }
 
@@ -762,12 +828,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabled.state = model.config.enabled ? .on : .off
         enabled.target = self
         menu.addItem(enabled)
+        switch model.update {
+        case .available(let offer): addUpdateItem(to: menu, title: String(format: L("Update to %@"), offer.version), action: #selector(installUpdate))
+        case .notInstallable(let version): addUpdateItem(to: menu, title: String(format: L("Update to %@"), version), action: #selector(openReleasePage))
+        case .downloading: addUpdateItem(to: menu, title: L("Downloading the update…"), action: nil)
+        case .installing: addUpdateItem(to: menu, title: L("Installing the update…"), action: nil)
+        case .installed(let version):
+            addUpdateItem(to: menu, title: String(format: L("Version %@ is installed. Quit LuminTool and open it again."), version), action: nil)
+        case .failed(let problem) where problem != .unavailable && problem != .rateLimited:
+            addUpdateItem(to: menu, title: problem.message, action: nil)
+            addUpdateItem(to: menu, title: L("Open release page"), action: #selector(openReleasePage))
+        default: break
+        }
         for (title, action) in [(L("Settings"), #selector(showSettings)), (L("Reset calibration"), #selector(reset)), (L("Quit"), #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self
             menu.addItem(item)
         }
     }
+
+    private func addUpdateItem(to menu: NSMenu, title: String, action: Selector?) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = action != nil
+        menu.addItem(item)
+    }
+
+    @objc private func installUpdate() { model.installUpdate() }
+    @objc private func openReleasePage() { model.openReleasePage() }
 
     @objc func showSettings() {
         if window == nil {
